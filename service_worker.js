@@ -300,6 +300,17 @@ async function maybeInjectProtection(tabId, url) {
   } catch (error) {
     // Ignore pages that cannot be injected (Chrome internals, restricted pages).
   }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      files: ["page_guard.js"],
+      injectImmediately: true,
+      world: "MAIN",
+    });
+  } catch (error) {
+    // Ignore pages that cannot be injected (Chrome internals, restricted pages).
+  }
 }
 
 async function handleCreatedTab(tab) {
