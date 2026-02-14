@@ -154,7 +154,8 @@ function pageGuard(config) {
 
   const channel = config.channel;
   const gestureWindowMs = Number(config.gestureWindowMs) || 1200;
-  let lastTrustedInputAt = 0;
+  let lastTrustedAnchorHref = "";
+  let lastTrustedAnchorAt = 0;
 
   const trackedEvents = [
     "pointerdown",
@@ -173,12 +174,13 @@ function pageGuard(config) {
           return;
         }
 
-        lastTrustedInputAt = Date.now();
         postMessageToExtension("ATB_PAGE_USER_GESTURE", { kind: eventName });
 
         if (eventName === "click") {
           const anchor = findAnchorInPage(event);
           if (anchor && anchor.href) {
+            lastTrustedAnchorHref = anchor.href;
+            lastTrustedAnchorAt = Date.now();
             postMessageToExtension("ATB_PAGE_CLICK", { href: anchor.href });
           }
         }
@@ -192,13 +194,13 @@ function pageGuard(config) {
     window.open = function guardedOpen(url, target, features) {
       const resolved = resolveUrl(url);
       const sameOrigin = Boolean(resolved) && resolved.origin === location.origin;
-      const allow = sameOrigin || hasRecentGesture();
+      const allow = sameOrigin || hasRecentMatchingAnchorClick(resolved);
 
       if (!allow) {
         postMessageToExtension("ATB_PAGE_BLOCKED", {
           eventType: "popup_window_open",
           targetUrl: resolved ? resolved.href : stringifyUrl(url),
-          reason: "window_open_without_recent_user_gesture",
+          reason: "window_open_without_matching_user_click",
         });
         return null;
       }
@@ -245,21 +247,42 @@ function pageGuard(config) {
     }
 
     const sameOrigin = resolved.origin === location.origin;
-    if (sameOrigin || hasRecentGesture()) {
+    if (sameOrigin || hasRecentMatchingAnchorClick(resolved)) {
       return false;
     }
 
     postMessageToExtension("ATB_PAGE_BLOCKED", {
       eventType,
       targetUrl: resolved.href,
-      reason: "cross_origin_location_change_without_recent_user_gesture",
+      reason: "cross_origin_location_change_without_matching_user_click",
     });
 
     return true;
   }
 
-  function hasRecentGesture() {
-    return Date.now() - lastTrustedInputAt <= gestureWindowMs;
+  function hasRecentMatchingAnchorClick(targetUrl) {
+    if (!targetUrl || !lastTrustedAnchorHref) {
+      return false;
+    }
+
+    if (Date.now() - lastTrustedAnchorAt > gestureWindowMs) {
+      return false;
+    }
+
+    const clicked = resolveUrl(lastTrustedAnchorHref);
+    if (!clicked) {
+      return false;
+    }
+
+    if (targetUrl.origin !== clicked.origin) {
+      return false;
+    }
+
+    return (
+      targetUrl.pathname === clicked.pathname ||
+      `${targetUrl.pathname}${targetUrl.search}` ===
+        `${clicked.pathname}${clicked.search}`
+    );
   }
 
   function resolveUrl(value) {
