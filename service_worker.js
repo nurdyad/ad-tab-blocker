@@ -7,6 +7,7 @@ const DEFAULT_SETTINGS = Object.freeze({
 const USER_GESTURE_WINDOW_MS = 1500;
 const CONTEXT_MENU_GESTURE_WINDOW_MS = 8000;
 const CLICK_MATCH_WINDOW_MS = 3000;
+const NEW_TAB_CONTEXT_TTL_MS = 15000;
 const MAX_LOG_ENTRIES = 100;
 
 const ALLOWED_USER_TRANSITIONS = new Set([
@@ -25,14 +26,15 @@ const blockedEvents = [];
 const tabState = new Map();
 const recentGestures = new Map();
 const recentClicks = new Map();
+const newTabContexts = new Map();
 const restoreInFlight = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
-  void ensureSettings();
+  void initializeRuntime();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void getSettings();
+  void initializeRuntime();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -66,7 +68,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === "loading" && tab.url) {
+  if (typeof changeInfo.url === "string" && changeInfo.url) {
+    tabState.set(tabId, { url: changeInfo.url, ts: Date.now() });
+  }
+
+  if (
+    (changeInfo.status === "loading" || typeof changeInfo.url === "string") &&
+    tab.url
+  ) {
     void maybeInjectProtection(tabId, tab.url);
   }
 });
@@ -82,6 +91,8 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   cleanupTabState(tabId);
 });
+
+void initializeRuntime();
 
 async function handleMessage(message, sender) {
   switch (message?.type) {
@@ -141,6 +152,30 @@ async function handleMessage(message, sender) {
 
     default:
       return { ok: false, error: "unknown_message_type" };
+  }
+}
+
+async function initializeRuntime() {
+  await ensureSettings();
+  await bootstrapCurrentTabs();
+}
+
+async function bootstrapCurrentTabs() {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (error) {
+    return;
+  }
+
+  const now = Date.now();
+  for (const tab of tabs) {
+    if (tab.id == null || !tab.url) {
+      continue;
+    }
+
+    tabState.set(tab.id, { url: tab.url, ts: now });
+    await maybeInjectProtection(tab.id, tab.url);
   }
 }
 
@@ -273,37 +308,47 @@ async function handleCreatedTab(tab) {
   }
 
   const openerTabId = tab.openerTabId;
-  let openerUrl = tabState.get(openerTabId)?.url || "";
-
-  if (!openerUrl) {
-    try {
-      const openerTab = await chrome.tabs.get(openerTabId);
-      openerUrl = openerTab.url || "";
-    } catch (error) {
-      openerUrl = "";
-    }
-  }
+  const openerUrl = await resolveTabUrl(openerTabId);
 
   if (!openerUrl || !(await isProtectionEnabledForUrl(openerUrl))) {
     return;
   }
 
+  const now = Date.now();
   const targetUrl = tab.pendingUrl || tab.url || "";
-  const recentClick = recentClicks.get(openerTabId);
+  const recentClick = getFreshClickInfo(openerTabId, now);
+  const hasContextMenuGesture = hasRecentGestureOfKinds(
+    openerTabId,
+    new Set(["contextmenu"]),
+    now
+  );
+
+  newTabContexts.set(tab.id, {
+    openerTabId,
+    openerUrl,
+    expectedHref: recentClick?.href || "",
+    createdTs: now,
+    contextMenuIntent: hasContextMenuGesture,
+  });
+
+  if (!targetUrl || isBlankLikeUrl(targetUrl)) {
+    return;
+  }
+
   const recentClickMatch =
     Boolean(recentClick) &&
-    Date.now() - recentClick.ts <= CLICK_MATCH_WINDOW_MS &&
-    Boolean(targetUrl) &&
     doesTargetMatchClickedLink(targetUrl, recentClick.href);
 
   const shouldAllow =
     isSameOrigin(targetUrl, openerUrl) ||
     recentClickMatch ||
-    hasRecentGesture(openerTabId);
+    hasContextMenuGesture;
 
   if (shouldAllow) {
     return;
   }
+
+  newTabContexts.delete(tab.id);
 
   try {
     await chrome.tabs.remove(tab.id);
@@ -339,6 +384,34 @@ async function handleCommittedNavigation(details) {
     tabState.set(tabId, { url: targetUrl, ts: now });
     await maybeInjectProtection(tabId, targetUrl);
     return;
+  }
+
+  const newTabContext = newTabContexts.get(tabId);
+  if (newTabContext) {
+    const decision = evaluateNewTabNavigation(details, newTabContext, now);
+
+    if (!decision.allow) {
+      newTabContexts.delete(tabId);
+
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch (error) {
+        // Tab may already be gone.
+      }
+
+      addBlockedEvent({
+        type: "popup_tab",
+        targetUrl,
+        sourceTabId: newTabContext.openerTabId,
+        sourceUrl: newTabContext.openerUrl,
+        reason: decision.reason,
+      });
+      return;
+    }
+
+    if (!decision.keepContext) {
+      newTabContexts.delete(tabId);
+    }
   }
 
   const previousUrl = tabState.get(tabId)?.url || "";
@@ -404,6 +477,66 @@ function evaluateNavigation(details, previousUrl) {
   return {
     allow: false,
     reason: "cross_origin_without_explicit_user_intent",
+  };
+}
+
+function evaluateNewTabNavigation(details, context, now = Date.now()) {
+  if (now - context.createdTs > NEW_TAB_CONTEXT_TTL_MS) {
+    return {
+      allow: true,
+      keepContext: false,
+      reason: "new_tab_context_expired",
+    };
+  }
+
+  const targetUrl = details.url;
+  if (!targetUrl || isBlankLikeUrl(targetUrl) || !isWebUrl(targetUrl)) {
+    return {
+      allow: true,
+      keepContext: true,
+      reason: "waiting_for_initial_web_navigation",
+    };
+  }
+
+  if (isSameOrigin(targetUrl, context.openerUrl)) {
+    return {
+      allow: true,
+      keepContext: false,
+      reason: "same_origin_new_tab_navigation",
+    };
+  }
+
+  if (
+    context.expectedHref &&
+    doesTargetMatchClickedLink(targetUrl, context.expectedHref)
+  ) {
+    return {
+      allow: true,
+      keepContext: false,
+      reason: "new_tab_matches_clicked_link",
+    };
+  }
+
+  if (context.contextMenuIntent && details.transitionType === "link") {
+    return {
+      allow: true,
+      keepContext: false,
+      reason: "context_menu_new_tab_open",
+    };
+  }
+
+  if (isExplicitBrowserNavigation(details)) {
+    return {
+      allow: true,
+      keepContext: false,
+      reason: "browser_ui_navigation",
+    };
+  }
+
+  return {
+    allow: false,
+    keepContext: false,
+    reason: "new_tab_without_clicked_link_match",
   };
 }
 
@@ -489,6 +622,33 @@ function hasRecentGesture(tabId) {
   return Date.now() - gesture.ts <= windowMs;
 }
 
+function hasRecentGestureOfKinds(tabId, kinds, now = Date.now()) {
+  const gesture = recentGestures.get(tabId);
+  if (!gesture || !kinds.has(gesture.kind)) {
+    return false;
+  }
+
+  const windowMs =
+    gesture.kind === "contextmenu"
+      ? CONTEXT_MENU_GESTURE_WINDOW_MS
+      : USER_GESTURE_WINDOW_MS;
+
+  return now - gesture.ts <= windowMs;
+}
+
+function getFreshClickInfo(tabId, now = Date.now()) {
+  const clickInfo = recentClicks.get(tabId);
+  if (!clickInfo) {
+    return null;
+  }
+
+  if (now - clickInfo.ts > CLICK_MATCH_WINDOW_MS) {
+    return null;
+  }
+
+  return clickInfo;
+}
+
 function doesTargetMatchClickedLink(targetUrl, clickedHref) {
   const target = safeUrl(targetUrl);
   const clicked = safeUrl(clickedHref);
@@ -499,8 +659,13 @@ function doesTargetMatchClickedLink(targetUrl, clickedHref) {
 
   const comparableTarget = `${target.origin}${target.pathname}${target.search}`;
   const comparableClicked = `${clicked.origin}${clicked.pathname}${clicked.search}`;
+  const comparableTargetPath = `${target.origin}${target.pathname}`;
+  const comparableClickedPath = `${clicked.origin}${clicked.pathname}`;
 
-  return comparableTarget === comparableClicked || target.origin === clicked.origin;
+  return (
+    comparableTarget === comparableClicked ||
+    comparableTargetPath === comparableClickedPath
+  );
 }
 
 function isSameOrigin(urlA, urlB) {
@@ -554,6 +719,32 @@ function safeUrl(input) {
   }
 }
 
+async function resolveTabUrl(tabId) {
+  const fromCache = tabState.get(tabId)?.url || "";
+  if (fromCache) {
+    return fromCache;
+  }
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab.url || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function isBlankLikeUrl(url) {
+  if (!url) {
+    return true;
+  }
+
+  return (
+    url === "about:blank" ||
+    url.startsWith("about:blank#") ||
+    url.startsWith("chrome://newtab")
+  );
+}
+
 function numberOrNow(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : Date.now();
 }
@@ -562,5 +753,6 @@ function cleanupTabState(tabId) {
   tabState.delete(tabId);
   recentGestures.delete(tabId);
   recentClicks.delete(tabId);
+  newTabContexts.delete(tabId);
   restoreInFlight.delete(tabId);
 }
