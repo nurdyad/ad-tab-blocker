@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ad Tab Blocker</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="popup">
+    <main>
+      <h1>Ad Tab Blocker</h1>
+
+      <label class="toggle-row">
+        <span>Global protection</span>
+        <input id="globalToggle" type="checkbox" />
+      </label>
+
+      <section class="card">
+        <div class="row">
+          <span class="label">Current site</span>
+          <strong id="siteHost">Not a web page</strong>
+        </div>
+
+        <label class="toggle-row">
+          <span>Protection on this site</span>
+          <input id="siteToggle" type="checkbox" disabled />
+        </label>
+
+        <p id="siteStatus" class="muted"></p>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <span class="label">Blocked events</span>
+          <div class="row-actions">
+            <button id="refreshLogs" class="small" type="button">Refresh</button>
+            <button id="clearLogs" class="small" type="button">Clear</button>
+          </div>
+        </div>
+
+        <ul id="logList" class="log-list"></ul>
+      </section>
+
+      <footer>
+        <a href="#" id="openOptions">Manage protected domains</a>
+      </footer>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
