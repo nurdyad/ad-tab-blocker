@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Ad Tab Blocker",
+  "description": "Blocks intrusive popups and forced redirects on protected streaming domains.",
+  "version": "1.0.0",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "action": {
+    "default_title": "Ad Tab Blocker",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html"
+}

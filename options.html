@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ad Tab Blocker Options</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="options-main">
+      <h1>Protected Domains</h1>
+      <p class="muted">
+        Protection runs only on domains listed here (unless you force-enable/disable a specific host from the popup).
+      </p>
+
+      <form id="addDomainForm" class="domain-form">
+        <input
+          id="domainInput"
+          type="text"
+          autocomplete="off"
+          placeholder="example.com"
+          aria-label="Domain"
+        />
+        <button type="submit">Add</button>
+      </form>
+
+      <p id="optionsStatus" class="muted"></p>
+
+      <ul id="domainList" class="domain-list"></ul>
+
+      <p class="muted">Default protected domain: <code>cinefreak.net</code></p>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>
